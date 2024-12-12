@@ -1,0 +1,191 @@
+---
+title: "SAIL-MENO Cohort"
+output: word_document
+date: "2024-11-28"
+---
+
+## Source code
+
+Use this code to gain access to the SAIL data and create the base tables needed to create SAIL-MENO. 
+
+You can amend this code on the source file based on your research requirements. For example, you can choose to include or exclude certain surgeries, symptoms, medications and conditions. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+source("0-project-setup RA.r")
+
+source("1-base-tables.R")
+
+```
+
+## Menopause Demographics
+
+Now you have all the code you need to view the menopause demographics data.
+
+```{r demo}
+
+meno_demographics <- runSQL(conn,paste0("select * from ",meno_demographics," ", sep=""))
+head(meno_demographics)
+
+```
+
+## Summary Statistics Table
+
+Create and view the summary statistics table for SAIL-MENO:
+
+```{r create_table, echo=TRUE}
+
+# Remove dates missing from meno_demographics:
+
+meno_demographics <- meno_demographics%>%filter(between(FIRST_KNOWN_MENOPAUSE_START_DT,"1996-01-01", "2023-12-31"))
+
+                              
+# Get column with first menopause status 
+
+meno_demographics <- meno_demographics%>%
+  group_by(ALF_PE)%>%
+  mutate(first_type=MENOPAUSE_TYPE[which.min(FIRST_KNOWN_MENOPAUSE_START_DT)])%>%
+  ungroup()
+
+
+# Recode all future dates to feb 2024 date (most recent verified date we have in SAIL)
+
+meno_demographics <- meno_demographics%>%
+  mutate(END_DATE=pmin(END_DATE,as.Date('2024-03-01')))
+
+# Get durations in there 
+
+meno_demographics <- meno_demographics%>%
+  group_by(ALF_PE)%>%
+  mutate(
+    max_end_date=max(END_DATE, na.rm=TRUE),
+    min_meno_date=min(FIRST_KNOWN_MENOPAUSE_START_DT, na.rm=TRUE),
+    duration=as.numeric(max_end_date- min_meno_date))
+
+na_count <- sum(is.infinite(meno_demographics$duration))
+na_count
+
+# We have duration rows with Inf values which means these few people had missing data for their END_DATE
+
+# As this number is small lets impute using mean duration:
+
+meno_demographics <- meno_demographics%>%
+  group_by(ALF_PE)%>%
+  mutate(
+    mean_value=round(mean(duration[!is.infinite(duration)],na.rm=TRUE), 0),
+    duration=ifelse(is.infinite(duration),mean_value, duration))%>%
+  ungroup()%>%
+  dplyr::select(-mean_value)
+
+na_count <- sum(is.infinite(meno_demographics$duration))
+na_count
+  
+# Create wide format data 
+
+meno_demographics$FIRST_KNOWN_MENOPAUSE_START_DT <- as.Date(meno_demographics$FIRST_KNOWN_MENOPAUSE_START_DT)
+
+meno_demographics$EVIDENCE_TYPE <- as.factor(meno_demographics$EVIDENCE_TYPE)
+
+meno_demographics$MENOPAUSE_TYPE <- as.factor(meno_demographics$MENOPAUSE_TYPE)
+
+meno_demographics[5:26] <- lapply(meno_demographics[5:26],as.character)
+
+
+
+meno_complete <- meno_demographics%>%
+  arrange(ALF_PE, FIRST_KNOWN_MENOPAUSE_START_DT)%>%
+  group_by(ALF_PE)%>%
+  summarise(
+    MENOPAUSE_TYPE=first(MENOPAUSE_TYPE),
+    duration=first(duration),
+    FIRST_KNOWN_MENOPAUSE_START_DT=first(FIRST_KNOWN_MENOPAUSE_START_DT),
+    EVIDENCE_TYPE=first(EVIDENCE_TYPE),
+    AGE_AT_MENO=first(AGE_AT_MENO),
+    TOWNSEND_2011_QUINTILE=first(TOWNSEND_2011_QUINTILE),
+    across(where(is.character),~ifelse(any(.=='Y'), 'Y', 'N')))%>%
+      ungroup()
+
+
+# Refine surgery columns to 
+
+# We need bilateral oophorectomy with hysterectomy column 
+
+meno_complete$BILAT_WITH_HYST <- ifelse(meno_complete$BILATERAL_OOPHORECTOMY=='Y'& meno_complete$WITHHYSTERECTOMY=='Y', 'Y', 'N')
+
+# We need bilateral oophprectomy only column 
+
+meno_complete$BILAT_ONLY <- ifelse(meno_complete$BILATERAL_OOPHORECTOMY=='Y'& meno_complete$WITHHYSTERECTOMY=='N', 'Y', 'N')
+
+
+# We need any HRT column 
+
+meno_complete$HRT_REFINED <- ifelse(meno_complete$COMBINED_PATCHES=='Y'
+                                    | meno_complete$COMBINED_TABLETS=='Y'
+                                    | meno_complete$OESTROGEN_PATCHES=='Y'
+                                    | meno_complete$OESTROGEN_TABLETS=='Y'
+                                    | meno_complete$OESTROGEN_GELS=='Y'
+                                    | meno_complete$OESTROGEN_IMPLANTS=='Y'
+                                    | meno_complete$OESTROGEN_NASAL=='Y'
+                                    | meno_complete$TESTOSTERONE =='Y'
+                                    , 'Y', 'N')
+
+
+
+## View list of variables
+
+column_names <- names(meno_complete)
+column_numbers <- seq_along(meno_complete)
+column_info <- data.frame(column_name=column_names, column_number=column_numbers)
+print(column_info)
+    
+table2 <- meno_complete[,c(2, 3, 6:7, 10, 21,  32, 13:20, 30:31)]
+
+table2 <- table2%>%
+  mutate(MENOPAUSE_TYPE=
+           recode(
+             MENOPAUSE_TYPE,
+             Early_menopause= 'Premature Menopause',
+             Surgical_menopause='Surgical Menopause',
+             Symptomatic_menopause='Symptomatic Menopause'
+           ))
+
+tbl_summary(table2, 
+            by=MENOPAUSE_TYPE,
+            missing='no',
+            type=all_continuous()~'continuous',
+            statistic=all_continuous()~'{median}({p25}),({p75})',
+            label=list(
+              TOWNSEND_2011_QUINTILE~'Deprivation Quintile',
+              duration~'Follow-up Duration (Days)',
+              HOT_FLUSHES~'Hot Flushes on Record',
+              HRT_REFINED~'Ever Prescribed HRT',
+              COMBINED_PATCHES~'Ever Prescribed Combined Patches',
+             COMBINED_TABLETS~'Ever Prescribed Combined Tablets',
+              OESTROGEN_PATCHES~'Ever Prescribed Oestrogen Patches',
+              OESTROGEN_GELS~'Ever Prescribed Oestrogen Gels',
+              OESTROGEN_IMPLANTS~'Ever Prescribed Oestrogen Implants',
+             OESTROGEN_NASAL~'Ever Prescribed Oestrogen Nasal Sprays',
+              OESTROGEN_TABLETS~'Ever Prescribed Oestrogen Tablets',
+              TESTOSTERONE~'Ever Prescribed Testosterone',
+             BILAT_WITH_HYST~'Bilateral Oophorectomy with Hysterectomy',
+              BILAT_ONLY~'Bilateral Oophorectomy without Hysterectomy',
+              REPORTED_SYMPTOMS~'Menopause Symptoms on Record',
+              AGE_AT_MENO~'Age at Menopause Onset'
+              
+            ))%>%
+  bold_labels()%>%
+  modify_spanning_header(all_stat_cols()~'**First Menopausal Status**')%>%
+  as_gt()
+
+
+
+
+```
+
+
+
+
+
+
+
